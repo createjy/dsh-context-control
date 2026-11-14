@@ -298,7 +298,7 @@ window.__ModuleLoader__.load({
     const CAP_MODES = [
       { value: "on", label: "加载", hint: "完整发送：正文、工具都在" },
       { value: "brief", label: "简介", hint: "不发送正文，只留一行简介；被调用时自动恢复，不用确认" },
-      { value: "hidden", label: "隐藏", hint: "连简介都不发；被调用时先征求你同意" },
+      { value: "hidden", label: "隐藏", hint: "默认不加载，也不发简介；模型需要时会自己打开，不用审批" },
     ];
 
     function modeOfCaps(caps, key) {
@@ -791,7 +791,7 @@ window.__ModuleLoader__.load({
           { className: "cc-tally" },
           tallyItem("on", "加载", buckets.on.length, `≈${formatTokens(sumTokens(buckets.on))}`),
           tallyItem("brief", "只留简介", buckets.brief.length, buckets.brief.length ? `少发 ≈${formatTokens(sumTokens(buckets.brief))}` : ""),
-          tallyItem("hidden", "完全不显示", buckets.hidden.length, buckets.hidden.length ? `少发 ≈${formatTokens(sumTokens(buckets.hidden))}` : ""),
+          tallyItem("hidden", "默认不加载", buckets.hidden.length, buckets.hidden.length ? `少发 ≈${formatTokens(sumTokens(buckets.hidden))}` : ""),
           h("span", { className: "cc-tally-item" },
             h("span", null, "合计少发"),
             h("b", null, `≈${formatTokens(savedTokens)}`)),
@@ -822,9 +822,9 @@ window.__ModuleLoader__.load({
             type: "button",
             className: "cc-btn is-mini is-danger",
             disabled: busy,
-            title: isGlobal ? "全局所有能力都完全不显示" : "所有项目、所有能力都完全不显示",
+            title: isGlobal ? "全局所有能力都默认不加载" : "所有项目、所有能力都默认不加载",
             onClick: () => {
-              if (!window.confirm((isGlobal ? "把全局的" : "把所有项目的") + "技能、MCP、插件都设成「完全不显示」？模型连简介都看不到，被调用时会先问你。")) return;
+              if (!window.confirm((isGlobal ? "把全局的" : "把所有项目的") + "技能、MCP、插件都设成「默认不加载」？模型看不到它们，但需要时会自己打开，不用你审批。")) return;
               void bulkAll("hidden");
             },
           }, "全部隐藏"),
@@ -2440,7 +2440,7 @@ window.__ModuleLoader__.load({
           h(
             "div",
             { className: "cc-pop-note" },
-            "只作用于本会话，不改项目/工作区；加载 = 正文与工具都发，简介 = 只留一行说明，隐藏 = 连简介都不发，调用要审批。",
+            "只作用于本会话，不改项目/工作区；加载 = 正文与工具都发，简介 = 只留一行说明，隐藏 = 默认不加载、模型需要时自己打开。",
           ),
         );
       };
