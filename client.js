@@ -2139,13 +2139,23 @@ window.__ModuleLoader__.load({
         [state, session, mode],
       );
 
-      // 默认勾上最占地方的两块（通常是「工具结果」和「系统消息副本」）：
-      // 用户点开胶囊直接按「发送压缩指令」就能压到真正的大头。
+      // 勾选项常驻：优先恢复上一次的选择（存在 modes.json 的 ui.compressPicks 里），
+      // 第一次用才退回「最占地方的两块」。这样不必每次打开都重勾一遍。
       useEffect(() => {
         if (!open || preset || modules.length === 0) return;
-        setChecked(Object.fromEntries(modules.slice(0, 2).map((item) => [item.key, true])));
+        const remembered = Array.isArray(state?.ui?.compressPicks) ? state.ui.compressPicks : [];
+        const keys = new Set(modules.map((item) => item.key));
+        const restored = remembered.filter((key) => keys.has(key));
+        const picks = restored.length > 0 ? restored : modules.slice(0, 2).map((item) => item.key);
+        setChecked(Object.fromEntries(picks.map((key) => [key, true])));
         setPreset(true);
-      }, [open, preset, modules]);
+      }, [open, preset, modules, state?.ui?.compressPicks]);
+
+      // 每次改动都写回：下次打开（甚至重启 DSH 后）还是这一组。
+      const rememberPicks = (next) => {
+        const keys = Object.keys(next).filter((key) => next[key]);
+        void request(null, { action: "setUi", compressPicks: keys, scopeKey: "default" }).catch(() => {});
+      };
       const selected = modules.filter((item) => checked[item.key]);
       const selectedTokens = selected.reduce((sum, item) => sum + item.tokens, 0);
 
@@ -2334,7 +2344,11 @@ window.__ModuleLoader__.load({
       const sessionSum = sumOf(sessionItems);
       const projected = state?.projected ?? null;
       const rawPromptSum = sumOf(promptItems);
-      const promptSum = projected?.total ?? rawPromptSum;
+      // 真实请求 = 系统提示 + 工具定义 + 宿主每轮追加的用户消息（运行时快照 / 技能目录 /
+      // 插件召回 / 时间）。最后这几项不在装配结果里，只看 projected 会永远少一截
+      // （实测 12.9k vs 实际 16.1k）。
+      const injectionSum = Number(session?.latestTurnInjectionTokens ?? 0);
+      const promptSum = (projected?.total ?? rawPromptSum) + injectionSum;
       const savedPrompt = projected?.removedTokens ?? 0;
       // 只数界面上真的会列出来的项：0 token 的空段不参与页签计数，别让概览多数出两个。
       const visibleRemovedSections = (projected?.removed?.sections ?? []).filter((name) =>
@@ -2342,7 +2356,7 @@ window.__ModuleLoader__.load({
       ).length;
       const removedCount = visibleRemovedSections + (projected?.removed?.tools?.length ?? 0);
       const nextTurn = used == null ? null : used + promptSum;
-      const sumHintText = `当前窗口是胶囊与 DSH 显示的口径（会话已累积 ≈${formatTokens(sessionSum)}）；每次重发是下一轮额外要发的系统提示与工具定义`
+      const sumHintText = `当前窗口是胶囊与 DSH 显示的口径（会话已累积 ≈${formatTokens(sessionSum)}）；每次重发 = 系统提示与工具定义 ≈${formatTokens(projected?.total ?? rawPromptSum)} + 宿主每轮追加的用户消息 ≈${formatTokens(injectionSum)}（运行时快照 / 技能目录 / 插件召回 / 时间）`
         + (removedCount > 0 ? `，已扣掉 ${removedCount} 个隐藏段/工具（≈${formatTokens(savedPrompt)}）` : "")
         + `。两者相加只是下一轮的粗估，不是现在的占用。`;
 
@@ -2368,7 +2382,12 @@ window.__ModuleLoader__.load({
           h("input", {
             type: "checkbox",
             checked: Boolean(checked[item.key]),
-            onChange: (event) => setChecked((current) => ({ ...current, [item.key]: event.target.checked })),
+            onChange: (event) =>
+              setChecked((current) => {
+                const next = { ...current, [item.key]: event.target.checked };
+                rememberPicks(next);
+                return next;
+              }),
           }),
           h("span", { className: "cc-pick-label" }, item.label),
           item.count ? h("span", { className: "cc-muted" }, `${item.count} 项`) : null,
@@ -2443,7 +2462,17 @@ window.__ModuleLoader__.load({
                       "当前窗口 ",
                       h("b", null, formatTokens(used)),
                     ),
-                    h("span", null, "每次重发 ≈", h("b", null, formatTokens(promptSum))),
+                    h(
+                      "span",
+                      {
+                        title: injectionSum > 0
+                          ? `系统提示与工具定义 ≈${formatTokens(projected?.total ?? rawPromptSum)} + 每轮注入 ≈${formatTokens(injectionSum)}（${(session?.injectionGroups ?? []).map((g) => `${g.label} ${formatTokens(g.tokens)}`).join("、") || "宿主每轮追加"}）`
+                          : "系统提示与工具定义",
+                      },
+                      "每次重发 ≈",
+                      h("b", null, formatTokens(promptSum)),
+                      injectionSum > 0 ? h("span", { className: "cc-muted" }, `（含注入 ${formatTokens(injectionSum)}）`) : null,
+                    ),
                     h("span", null, "下一轮预计 ≈", h("b", null, formatTokens(nextTurn))),
                   ),
               h(
