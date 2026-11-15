@@ -175,3 +175,36 @@ test("transaction 串行且只提交一次", async () => {
   assert.equal(store.revision, before + 3);
   assert.equal(typeof sanitizeState(store.state).revision, "number");
 });
+
+test("常驻要求按 会话 > 项目 > 全局 生效，空文本不注入", () => {
+  const { store } = tempStore();
+  assert.deepEqual(store.effectiveNote({ projectId: "workspace", sessionId: "s1" }), { text: "", enabled: false });
+
+  store.setNote("global", { text: "全局要求", enabled: true }, {});
+  assert.equal(store.effectiveNote({ projectId: "workspace", sessionId: "s1" }).text, "全局要求");
+
+  store.setNote("project", { text: "项目要求", enabled: true }, { projectId: "workspace" });
+  assert.equal(store.effectiveNote({ projectId: "workspace", sessionId: "s1" }).text, "项目要求");
+
+  store.setNote("session", { text: "会话要求", enabled: true }, { sessionId: "s1" });
+  assert.equal(store.effectiveNote({ projectId: "workspace", sessionId: "s1" }).text, "会话要求");
+  // 别的会话不该被这条影响
+  assert.equal(store.effectiveNote({ projectId: "workspace", sessionId: "s2" }).text, "项目要求");
+
+  // 关闭不等于删除：文本留着，但不再生效
+  store.setNote("session", { text: "会话要求", enabled: false }, { sessionId: "s1" });
+  assert.equal(store.effectiveNote({ projectId: "workspace", sessionId: "s1" }).text, "项目要求");
+
+  // 空文本直接删掉这一条，回到上层
+  store.setNote("project", { text: "", enabled: true }, { projectId: "workspace" });
+  assert.equal(store.effectiveNote({ projectId: "workspace", sessionId: "s2" }).text, "全局要求");
+});
+
+test("常驻要求与上次选中项目都能持久化", () => {
+  const { store, file } = tempStore();
+  store.setNote("global", { text: "只保留结论", enabled: true }, {});
+  store.setLastProjectId("p-42");
+  const fresh = new ModeStore({ dataDir: path.dirname(file) });
+  assert.equal(fresh.effectiveNote({}).text, "只保留结论");
+  assert.equal(fresh.lastProjectId(), "p-42");
+});

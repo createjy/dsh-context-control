@@ -90,3 +90,23 @@ test("明细开关能按层级翻回能力关掉的工具，但低层 true 不�
   const toolLayers2 = [{ [name]: { enabled: true } }, {}, {}, {}];
   assert.deepEqual(enabledToolOverrides(rules, capLayers2, toolLayers2), []);
 });
+
+test("传入 liveTools 时，只统计本会话真会收到的工具", () => {
+  const tools = [
+    { name: "mcp__github__list_issues", tokens: 100 },
+    { name: "mcp__github__search_issues", tokens: 200 },
+  ];
+  const catalog = buildCatalog({ sections: [], tools, liveTools: ["mcp__github__list_issues"] });
+  const github = catalog.mcp.find((entry) => entry.key === "mcp:github");
+  assert.equal(github.tokens, 300, "全量目录仍是 300");
+  assert.equal(github.liveToolCount, 1, "本会话只收到 1 个");
+  assert.equal(github.liveTokens, 100, "本轮只算 100");
+});
+
+test("不传 liveTools 时保持原有口径，不凭空造字段", () => {
+  const tools = [{ name: "mcp__github__list_issues", tokens: 100 }];
+  const catalog = buildCatalog({ sections: [], tools });
+  const github = catalog.mcp.find((entry) => entry.key === "mcp:github");
+  assert.equal(github.tokens, 100);
+  assert.equal(github.liveTokens, undefined);
+});

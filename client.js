@@ -221,17 +221,14 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** 客户端也估一下，编辑器里能实时看到改动后的体量（口径与宿主一致）。 */
+    /**
+     * 客户端也估一下，编辑器里能实时看到改动后的体量。
+     * 必须与宿主 `@deepseek-ai/dsh-token-meter` 一致（4 字符/token），
+     * 否则编辑器说 ≈35、宿主说 ≈14，用户没法判断哪个是真的。
+     */
     function estimateLocal(text) {
       if (!text) return 0;
-      let cjk = 0;
-      let other = 0;
-      for (const ch of String(text)) {
-        const cp = ch.codePointAt(0) || 0;
-        if (cp >= 0x2e80) cjk += 1;
-        else other += 1;
-      }
-      return Math.round(cjk + other / 3.6);
+      return Math.ceil(String(text).length / 4);
     }
 
     /* --------------------------------------------------------------- 左栏图标 */
@@ -312,16 +309,28 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 数字跟着档位走：加载 = 全量，简介 = 那一行摘要的估算，隐藏 = 0。
+     * 这一项「若完整加载」会发多少。
+     *
+     * 优先用 liveTokens（本会话这一步真实会发的工具 + 说明段）：预设会把工具收窄，
+     * 全局目录里的 174 个工具里可能只有 45 个真的发给这个会话；拿全量当分母会把
+     * 「预设本来就不给」算成「被我们省下的」。
+     */
+    function fullTokensOf(entry) {
+      return entry?.liveTokens ?? entry?.tokens ?? 0;
+    }
+
+    /**
+     * 数字跟着档位走：加载 = 本轮真实全量，简介 = 那一行摘要的估算，隐藏 = 0。
      * 界面上「这一档要花多少」必须能直接比较，所以不在旁边另标原值。
      */
     function tokenForMode(entry, mode) {
       if (mode === "hidden") return 0;
+      const full = fullTokensOf(entry);
       if (mode === "brief") {
         const line = `- ${entry.id}：${entry.summary ?? ""}`;
-        return Math.min(entry.tokens ?? 0, Math.ceil(line.length / 3) + 8);
+        return Math.min(full, Math.ceil(line.length / 4) + 6);
       }
-      return entry.tokens ?? 0;
+      return full;
     }
 
     function CapSeg({ mode, busy, onSet }) {
@@ -362,7 +371,16 @@ window.__ModuleLoader__.load({
         ),
         h(
           "span",
-          { className: "cc-num", title: `当前档位实际发送 ≈${formatTokens(tokenForMode(entry, mode))} / 全量 ≈${formatTokens(entry.tokens ?? 0)}` },
+          {
+            className: "cc-num",
+            title:
+              `当前档位实际发送 ≈${formatTokens(tokenForMode(entry, mode))}` +
+              ` / 本轮完整加载 ≈${formatTokens(fullTokensOf(entry))}` +
+              (entry.liveTokens != null && entry.tokens != null && entry.liveTokens !== entry.tokens
+                ? ` / 全局目录 ≈${formatTokens(entry.tokens)}`
+                : "") +
+              (entry.liveToolCount === 0 && (entry.toolNames ?? []).length > 0 ? "（本轮不含它的工具）" : ""),
+          },
           `≈${formatTokens(tokenForMode(entry, mode))}`,
         ),
         h(CapSeg, { mode, busy, onSet }),
@@ -374,9 +392,9 @@ window.__ModuleLoader__.load({
       const brief = modes.filter((mode) => mode === "brief").length;
       const hidden = modes.filter((mode) => mode === "hidden").length;
       const on = entries.length - brief - hidden;
-      const tokens = entries.reduce((sum, entry) => sum + (entry.tokens ?? 0), 0);
+      const tokens = entries.reduce((sum, entry) => sum + fullTokensOf(entry), 0);
       const offTokens = entries.reduce(
-        (sum, entry) => sum + (modeOfCaps(caps, entry.key) === "on" ? 0 : entry.tokens ?? 0),
+        (sum, entry) => sum + (modeOfCaps(caps, entry.key) === "on" ? 0 : fullTokensOf(entry)),
         0,
       );
       const actions = h(
@@ -601,7 +619,13 @@ window.__ModuleLoader__.load({
     }
 
     function ProjectCaps({ state, busy, act, scopeId: fixedScope }) {
-      const [projectId, setProjectId] = useState("");
+      // 记住上次选中的项目：下次打开面板/胶囊时直接落在同一个项目上。
+      const [projectId, setProjectId] = useState(() => String(state?.ui?.lastProjectId ?? ""));
+      useEffect(() => {
+        const remembered = String(state?.ui?.lastProjectId ?? "");
+        if (!remembered) return;
+        setProjectId((current) => current || remembered);
+      }, [state?.ui?.lastProjectId]);
       const [newName, setNewName] = useState("");
       const [newCwd, setNewCwd] = useState("");
       const [view, setView] = useState("skills");
@@ -646,7 +670,7 @@ window.__ModuleLoader__.load({
       const allEntries = [...catalog.skills, ...catalog.mcp, ...catalog.plugins];
       const buckets = { on: [], brief: [], hidden: [] };
       for (const entry of allEntries) buckets[modeOfCaps(caps, entry.key)].push(entry);
-      const sumTokens = (list) => list.reduce((sum, entry) => sum + (entry.tokens ?? 0), 0);
+      const sumTokens = (list) => list.reduce((sum, entry) => sum + fullTokensOf(entry), 0);
       const savedTokens = sumTokens(buckets.brief) + sumTokens(buckets.hidden);
       const offCount = buckets.brief.length + buckets.hidden.length;
 
@@ -747,7 +771,10 @@ window.__ModuleLoader__.load({
               value: selected.id,
               disabled: busy,
               "aria-label": "项目",
-              onChange: (event) => setProjectId(event.target.value),
+              onChange: (event) => {
+                setProjectId(event.target.value);
+                void act({ action: "setUi", lastProjectId: event.target.value });
+              },
             },
             projects.map((item) =>
               h("option", { key: item.id, value: item.id },
@@ -792,6 +819,9 @@ window.__ModuleLoader__.load({
           tallyItem("on", "加载", buckets.on.length, `≈${formatTokens(sumTokens(buckets.on))}`),
           tallyItem("brief", "只留简介", buckets.brief.length, buckets.brief.length ? `少发 ≈${formatTokens(sumTokens(buckets.brief))}` : ""),
           tallyItem("hidden", "默认不加载", buckets.hidden.length, buckets.hidden.length ? `少发 ≈${formatTokens(sumTokens(buckets.hidden))}` : ""),
+          h("span", { className: "cc-tally-item" },
+            h("span", null, "合计发送"),
+            h("b", null, `≈${formatTokens(sumTokens(buckets.on))}`)),
           h("span", { className: "cc-tally-item" },
             h("span", null, "合计少发"),
             h("b", null, `≈${formatTokens(savedTokens)}`)),
@@ -860,11 +890,11 @@ window.__ModuleLoader__.load({
             ...CAP_GROUPS.map((group) => {
               const list = catalog[group.key] ?? [];
               const onTokens = list.reduce(
-                (sum, entry) => sum + (modeOfCaps(caps, entry.key) === "on" ? entry.tokens ?? 0 : 0),
+                (sum, entry) => sum + (modeOfCaps(caps, entry.key) === "on" ? fullTokensOf(entry) : 0),
                 0,
               );
               const offTokens = list.reduce(
-                (sum, entry) => sum + (modeOfCaps(caps, entry.key) === "on" ? 0 : entry.tokens ?? 0),
+                (sum, entry) => sum + (modeOfCaps(caps, entry.key) === "on" ? 0 : fullTokensOf(entry)),
                 0,
               );
               return {
@@ -889,6 +919,7 @@ window.__ModuleLoader__.load({
               h("span", null, "当前占用 ", h("b", null, "≈" + formatTokens(st.loaded))),
               h("span", null, "全量 ", h("b", null, "≈" + formatTokens(st.full))),
               st.off ? h("span", { className: "is-err" }, "关闭 ", h("b", null, String(st.off)), " · ≈" + formatTokens(st.offT)) : null,
+              h("span", null, "合计发送 ", h("b", null, "≈" + formatTokens(st.loaded))),
               h("span", null, "合计少发 ", h("b", null, "≈" + formatTokens(st.offT))),
             );
           }
@@ -897,12 +928,13 @@ window.__ModuleLoader__.load({
           const mOn = list.filter((entry) => modeOfCaps(caps, entry.key) === "on");
           const mBrief = list.filter((entry) => modeOfCaps(caps, entry.key) === "brief");
           const mHidden = list.filter((entry) => modeOfCaps(caps, entry.key) === "hidden");
-          const sumT = (arr) => arr.reduce((sum, entry) => sum + (entry.tokens ?? 0), 0);
+          const sumT = (arr) => arr.reduce((sum, entry) => sum + fullTokensOf(entry), 0);
           return h("div", { className: "cc-stats" },
             h("span", null, group.title.replace(" 服务", ""), " ", h("b", null, String(list.length)), " 项"),
             h("span", null, "当前 ", h("b", null, "≈" + formatTokens(sumT(mOn)))),
             h("span", { className: "is-warn" }, "简介 ", h("b", null, String(mBrief.length)), mBrief.length ? " · 少发 ≈" + formatTokens(sumT(mBrief)) : ""),
             h("span", { className: "is-err" }, "隐藏 ", h("b", null, String(mHidden.length)), mHidden.length ? " · 少发 ≈" + formatTokens(sumT(mHidden)) : ""),
+            h("span", null, "合计发送 ", h("b", null, "≈" + formatTokens(sumT(mOn)))),
             h("span", null, "合计少发 ", h("b", null, "≈" + formatTokens(sumT(mBrief) + sumT(mHidden)))),
           );
         })(),
@@ -1452,7 +1484,7 @@ window.__ModuleLoader__.load({
       const catalogAll = [...(state?.capabilities?.skills ?? []), ...(state?.capabilities?.mcp ?? []), ...(state?.capabilities?.plugins ?? [])];
       const potentialOf = (caps) =>
         catalogAll.reduce(
-          (sum, entry) => sum + (modeOfCaps(caps ?? {}, entry.key) === "on" ? entry.tokens ?? 0 : 0),
+          (sum, entry) => sum + (modeOfCaps(caps ?? {}, entry.key) === "on" ? fullTokensOf(entry) : 0),
           0,
         );
       const projectRow = (state?.projects ?? []).find((item) => item.id === state?.activeProjectId) ?? null;
@@ -1532,6 +1564,7 @@ window.__ModuleLoader__.load({
           h("span", null, "全量 ", h("b", null, "≈" + formatTokens(stats.full))),
           stats.brief ? h("span", { className: "is-warn" }, "简介 ", h("b", null, String(stats.brief)), " · ≈" + formatTokens(stats.briefT)) : null,
           stats.hidden ? h("span", { className: "is-err" }, "隐藏 ", h("b", null, String(stats.hidden)), " · ≈" + formatTokens(stats.hiddenT)) : null,
+          h("span", null, "合计发送 ", h("b", null, "≈" + formatTokens(stats.loaded))),
           h("span", null, "合计少发 ", h("b", null, "≈" + formatTokens(stats.saved))),
         );
       const matchLeaf = (item, kind) => {
@@ -1572,7 +1605,15 @@ window.__ModuleLoader__.load({
             h("span", null, "显示 0 token 的空段"),
           ),
           h("span", { className: "cc-muted" }, hiddenCount > 0 ? `已收起 ${hiddenCount} 段` : "没有空段"),
-          h("span", { className: "cc-muted" }, prompt.toolsFrom === "schemas" ? "工具清单来自实时工具表" : ""),
+          h(
+            "span",
+            { className: "cc-muted", title: "工具清单按本会话这一步真实会收到的工具表统计：预设收窄掉的不算少发" },
+            prompt.toolsFrom === "live"
+              ? `工具清单来自本会话实时工具表${state?.liveTools?.count ? `（${state.liveTools.count} 个）` : ""}`
+              : prompt.toolsFrom === "schemas"
+                ? "工具清单来自全局注册表（本会话还没跑过请求）"
+                : "",
+          ),
           h("span", { className: "cc-count" }, `合计 ≈${formatTokens(loadedTotal)}`),
         ),
         h(SubTabs, {
@@ -1943,6 +1984,10 @@ window.__ModuleLoader__.load({
       const [checked, setChecked] = useState({});
       const [preset, setPreset] = useState(false);
       const [note, setNote] = useState("");
+      // 常驻要求：输入框文本与「每次发送都注入」开关分开存，写入走 setNote。
+      const [noteText, setNoteText] = useState("");
+      const [noteOn, setNoteOn] = useState(false);
+      const [noteScope, setNoteScope] = useState("session");
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState("");
       const [done, setDone] = useState("");
@@ -1977,6 +2022,33 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId]);
 
+      // 常驻要求以服务端为准：打开时回填「这个会话实际生效的那一条」。
+      useEffect(() => {
+        if (!open || !state?.notes) return;
+        const eff = state.notes.effective ?? { text: "", enabled: false };
+        setNoteText(String(eff.text ?? ""));
+        setNoteOn(eff.enabled === true && String(eff.text ?? "").trim().length > 0);
+        setNoteScope("session");
+      }, [open, state?.notes?.effective?.text, state?.notes?.effective?.enabled]);
+
+      const persistNote = async (text, enabled) => {
+        if (!sessionId) return;
+        const value = String(text ?? "");
+        try {
+          await request(null, {
+            action: "setNote",
+            scope: noteScope,
+            text: value,
+            enabled: enabled === true && value.trim().length > 0,
+            sessionId,
+          });
+          setNoteOn(enabled === true && value.trim().length > 0);
+          await load();
+        } catch (err) {
+          setError(messageOf(err));
+        }
+      };
+
       useEffect(() => {
         if (!open) return;
         setTab("usage");
@@ -1986,6 +2058,9 @@ window.__ModuleLoader__.load({
         setPreset(false);
         setDone("");
         setNote("");
+        setNoteText("");
+        setNoteOn(false);
+        setNoteScope("session");
         setPopQuery("");
         setPopStatus("all");
         void load();
@@ -2379,15 +2454,43 @@ window.__ModuleLoader__.load({
               ),
             ),
         h(
-          "label",
+          "div",
           { className: "cc-field" },
-          h("span", { className: "cc-field-label" }, "额外要求（可选）"),
+          h(
+            "div",
+            { className: "cc-note-head" },
+            h("span", { className: "cc-field-label" }, "常驻要求（可选）"),
+            h(
+              "label",
+              { className: "cc-note-toggle" },
+              h("input", {
+                type: "checkbox",
+                checked: noteOn,
+                disabled: busy || noteText.trim().length === 0,
+                onChange: (event) => void persistNote(noteText, event.target.checked),
+              }),
+              h("span", null, "每次发送都注入"),
+            ),
+          ),
           h("input", {
             className: "cc-input",
-            value: note,
+            value: noteText,
             placeholder: "例如：只保留结论与文件路径，不要日志全文",
-            onChange: (event) => setNote(event.target.value),
+            onChange: (event) => {
+              setNoteText(event.target.value);
+              setNote(event.target.value);
+            },
+            onBlur: () => void persistNote(noteText, noteOn),
           }),
+          h(
+            "div",
+            { className: "cc-note-hint" },
+            noteOn
+              ? `已随每次请求发送 ≈${formatTokens(estimateLocal(`## 常驻要求\n${noteText}`))} token（会话 > 项目 > 全局，就近生效）`
+              : noteText.trim()
+                ? "未开启：只保存文本，不会注入；勾选后每次请求都会发送。"
+                : "留空则不注入；勾选「每次发送都注入」后每次请求都会带上这段。",
+          ),
         ),
       );
 
@@ -2550,7 +2653,7 @@ window.__ModuleLoader__.load({
         const entries = kinds[tab] ?? [];
         const loaded = entries.filter((entry) => modeOfCaps(caps, entry.key) === "on").length;
         const saved = entries.reduce(
-          (sum, entry) => sum + (modeOfCaps(caps, entry.key) === "on" ? 0 : entry.tokens ?? 0),
+          (sum, entry) => sum + (modeOfCaps(caps, entry.key) === "on" ? 0 : fullTokensOf(entry)),
           0,
         );
         pageMeta = `本会话 · 继承项目 ${project?.name ?? "工作区"} · ${loaded}/${entries.length} 已加载 · 少发 ≈${formatTokens(saved)}`;
@@ -3086,6 +3189,11 @@ window.__ModuleLoader__.load({
 .cc-pick-row.is-on .cc-pick-label{font-weight:600}
 .cc-field{display:flex;flex-direction:column;gap:5px}
 .cc-field-label{font-size:11.5px;color:var(--dsw-alias-label-secondary,#5b616b)}
+.cc-note-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.cc-note-toggle{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--dsw-alias-label-secondary,#5b616b);cursor:pointer;user-select:none}
+.cc-note-toggle input{accent-color:var(--dsw-alias-state-business-primary,#3b6ef0);width:12px;height:12px;margin:0}
+.cc-note-toggle:has(input:disabled){opacity:.45;cursor:not-allowed}
+.cc-note-hint{font-size:10.5px;line-height:1.45;color:var(--dsw-alias-label-tertiary,#8a9099)}
 .cc-dialog-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px 18px;border-top:1px solid var(--dsw-alias-separator,rgba(0,0,0,.06))}
 @keyframes cc-fade{from{opacity:0}to{opacity:1}}
 @keyframes cc-rise{from{opacity:0;transform:translateY(6px) scale(.995)}to{opacity:1;transform:none}}
