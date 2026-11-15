@@ -48,6 +48,15 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings"
       ]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.2-alpha.2": "incompatible",
+        "0.2.2-alpha.3": "incompatible",
+        "0.2.2-rc.1": "compatible",
+        "0.2.2-rc.2": "compatible",
+        "0.2.2-rc.3": "compatible"
+      }
     }
   },
   "author": "creatjy",

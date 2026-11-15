@@ -1,5 +1,5 @@
-# 上下文管控：插进宿主，不单独占一个插件位（bundle patch 只做 insert）。
+# 上下文管控：只新增插件自有 entry，不替换官方组件。
+# inject 由 lib/index.js 的 export const inject 声明，patch 层不重复声明。
 - insert:
     - id: context-control
       name: dsh-context-control
-      inject: [systemPrompt, tools, webServer]
