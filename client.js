@@ -2022,31 +2022,52 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId]);
 
-      // 常驻要求以服务端为准：打开时回填「这个会话实际生效的那一条」。
+      // 常驻要求以服务端为准：打开时回填一次。
+      // 文本取「最近一层写过的那条」（会话 > 项目 > 全局）——即使用户只填了没开开关，
+      // 下次打开也要能看到自己填过的内容；开关状态用实际生效值。
+      // 只回填一次：否则后台轮询刷新 state 会把正在输入的草稿覆盖掉。
+      const noteHydratedRef = useRef(false);
       useEffect(() => {
-        if (!open || !state?.notes) return;
-        const eff = state.notes.effective ?? { text: "", enabled: false };
-        setNoteText(String(eff.text ?? ""));
-        setNoteOn(eff.enabled === true && String(eff.text ?? "").trim().length > 0);
-        setNoteScope("session");
-      }, [open, state?.notes?.effective?.text, state?.notes?.effective?.enabled]);
-
-      const persistNote = async (text, enabled) => {
-        if (!sessionId) return;
-        const value = String(text ?? "");
-        try {
-          await request(null, {
-            action: "setNote",
-            scope: noteScope,
-            text: value,
-            enabled: enabled === true && value.trim().length > 0,
-            sessionId,
-          });
-          setNoteOn(enabled === true && value.trim().length > 0);
-          await load();
-        } catch (err) {
-          setError(messageOf(err));
+        if (!open) {
+          noteHydratedRef.current = false;
+          return;
         }
+        if (!state?.notes || noteHydratedRef.current) return;
+        const notes = state.notes;
+        const stored =
+          String(notes.session?.text ?? "").trim() ||
+          String(notes.project?.text ?? "").trim() ||
+          String(notes.global?.text ?? "").trim() ||
+          String(notes.effective?.text ?? "");
+        setNoteText(stored);
+        setNoteOn(notes.effective?.enabled === true && String(notes.effective?.text ?? "").trim().length > 0);
+        setNoteScope("session");
+        noteHydratedRef.current = true;
+      }, [open, state?.notes]);
+
+      // 写入串行化：失焦与点开关可能连着触发，后一次必须覆盖前一次而不是互相抢。
+      const noteQueueRef = useRef(Promise.resolve());
+      const persistNote = (text, enabled) => {
+        if (!sessionId) return Promise.resolve();
+        const value = String(text ?? "");
+        const on = enabled === true && value.trim().length > 0;
+        noteQueueRef.current = noteQueueRef.current
+          .then(async () => {
+            // 注意签名是 request(payload, query)：写操作必须放第一个参数（POST），
+            // 放第二个会被当成 GET 的 query，服务端根本收不到 action。
+            await request({
+              action: "setNote",
+              scope: noteScope,
+              text: value,
+              enabled: on,
+              sessionId,
+            });
+            setNoteOn(on);
+          })
+          .catch((err) => {
+            setError(messageOf(err));
+          });
+        return noteQueueRef.current;
       };
 
       useEffect(() => {
@@ -2154,7 +2175,7 @@ window.__ModuleLoader__.load({
       // 每次改动都写回：下次打开（甚至重启 DSH 后）还是这一组。
       const rememberPicks = (next) => {
         const keys = Object.keys(next).filter((key) => next[key]);
-        void request(null, { action: "setUi", compressPicks: keys, scopeKey: "default" }).catch(() => {});
+        void request({ action: "setUi", compressPicks: keys, scopeKey: "default" }).catch(() => {});
       };
       const selected = modules.filter((item) => checked[item.key]);
       const selectedTokens = selected.reduce((sum, item) => sum + item.tokens, 0);
