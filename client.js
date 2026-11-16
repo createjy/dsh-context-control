@@ -2022,18 +2022,22 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId]);
 
-      // 常驻要求以服务端为准：打开时回填一次。
-      // 文本取「最近一层写过的那条」（会话 > 项目 > 全局）——即使用户只填了没开开关，
-      // 下次打开也要能看到自己填过的内容；开关状态用实际生效值。
-      // 只回填一次：否则后台轮询刷新 state 会把正在输入的草稿覆盖掉。
-      const noteHydratedRef = useRef(false);
+      // 常驻要求回填：以服务端为准，文本取「最近一层写过的那条」（会话 > 项目 > 全局），
+      // 即使只填了没开开关也要显示；开关状态用实际生效值。
+      //
+      // 两个坑：
+      //   1. 打开面板时 state 还是上一次的旧值，过早回填会把「刚保存的内容」盖成空的；
+      //      所以只要用户这次还没动过输入框（!dirty），state 每次更新都允许回填。
+      //   2. 用户正在打字时轮询把 state 刷新，绝不能用服务端值覆盖草稿 → dirty 一置位就不再回填。
+      const noteDirtyRef = useRef(false);
       useEffect(() => {
         if (!open) {
-          noteHydratedRef.current = false;
+          noteDirtyRef.current = false;
           return;
         }
-        if (!state?.notes || noteHydratedRef.current) return;
-        const notes = state.notes;
+        if (noteDirtyRef.current) return;
+        const notes = state?.notes;
+        if (!notes) return;
         const stored =
           String(notes.session?.text ?? "").trim() ||
           String(notes.project?.text ?? "").trim() ||
@@ -2042,10 +2046,24 @@ window.__ModuleLoader__.load({
         setNoteText(stored);
         setNoteOn(notes.effective?.enabled === true && String(notes.effective?.text ?? "").trim().length > 0);
         setNoteScope("session");
-        noteHydratedRef.current = true;
-      }, [open, state?.notes]);
+      }, [open, sessionId, state?.notes]);
 
-      // 写入串行化：失焦与点开关可能连着触发，后一次必须覆盖前一次而不是互相抢。
+      // 防抖回调要用最新一次的实现，避免闭包抓住旧的 noteScope/sessionId。
+      const persistNoteRef = useRef(null);
+      // 最新草稿：关闭面板时用它冲刷未落盘的输入。
+      const noteDraftRef = useRef({ text: "", on: false });
+      noteDraftRef.current = { text: noteText, on: noteOn };
+      // 输入防抖：不用等失焦，敲完约 500ms 就落盘。
+      const noteTimerRef = useRef(null);
+      const queueNoteSave = (text, enabled) => {
+        if (noteTimerRef.current) clearTimeout(noteTimerRef.current);
+        noteTimerRef.current = setTimeout(() => {
+          noteTimerRef.current = null;
+          void persistNoteRef.current?.(text, enabled);
+        }, 500);
+      };
+
+      // 写入串行化：失焦/输入防抖/点开关可能连着触发，后一次必须覆盖前一次而不是互相抢。
       const noteQueueRef = useRef(Promise.resolve());
       const persistNote = (text, enabled) => {
         if (!sessionId) return Promise.resolve();
@@ -2063,12 +2081,15 @@ window.__ModuleLoader__.load({
               sessionId,
             });
             setNoteOn(on);
+            // 不复位 dirty：这次打开期间用户已经动过输入框，轮询回来的是旧快照，
+            // 让它回填会把刚打的字盖掉。关闭面板时统一复位。
           })
           .catch((err) => {
             setError(messageOf(err));
           });
         return noteQueueRef.current;
       };
+      persistNoteRef.current = persistNote;
 
       useEffect(() => {
         if (!open) return;
@@ -2079,13 +2100,25 @@ window.__ModuleLoader__.load({
         setPreset(false);
         setDone("");
         setNote("");
-        setNoteText("");
-        setNoteOn(false);
-        setNoteScope("session");
         setPopQuery("");
         setPopStatus("all");
         void load();
       }, [open, load]);
+
+      // 关闭面板时把还没落盘的输入立刻写掉：用户常常是「打完字直接点空白处」，
+      // 等 500ms 防抖有丢失风险。用 ref 拿最新值，避开闭包里的旧文本。
+      //
+      // 必须在 open=false 这一次 effect 里**直接**写，不能塞进 cleanup：
+      // cleanup 要到下一次（重新打开）才执行，那时 hydrate 已把草稿覆盖成空，
+      // 反而会把刚打的字写成空串 —— 这正是「填完关掉再打开就没了」的根因。
+      useEffect(() => {
+        if (open || !noteTimerRef.current) return undefined;
+        clearTimeout(noteTimerRef.current);
+        noteTimerRef.current = null;
+        const latest = noteDraftRef.current;
+        void persistNoteRef.current?.(latest.text, latest.on);
+        return undefined;
+      }, [open]);
 
       useEffect(() => {
         if (!open) {
@@ -2517,7 +2550,10 @@ window.__ModuleLoader__.load({
                 type: "checkbox",
                 checked: noteOn,
                 disabled: busy || noteText.trim().length === 0,
-                onChange: (event) => void persistNote(noteText, event.target.checked),
+                onChange: (event) => {
+                  noteDirtyRef.current = true;
+                  void persistNote(noteText, event.target.checked);
+                },
               }),
               h("span", null, "每次发送都注入"),
             ),
@@ -2527,8 +2563,13 @@ window.__ModuleLoader__.load({
             value: noteText,
             placeholder: "例如：只保留结论与文件路径，不要日志全文",
             onChange: (event) => {
-              setNoteText(event.target.value);
-              setNote(event.target.value);
+              const next = event.target.value;
+              noteDirtyRef.current = true;
+              setNoteText(next);
+              setNote(next);
+              // 边打边存，避免「没等失焦就点别处关掉」导致丢失。
+              // 只存文本，不自动打开注入：开关状态由用户勾选决定。
+              queueNoteSave(next, noteOn);
             },
             onBlur: () => void persistNote(noteText, noteOn),
           }),
